@@ -50,3 +50,6 @@ forge test -vv
 
 ## Key Insight
 The Euler attack created a divergence between eToken assets and dToken liabilities that grew with every exploit transaction. A Drosera trap monitoring this ratio in real time would have detected the anomaly within the same block the attack began — giving protocols the opportunity to trigger an emergency pause before funds were fully drained.
+
+## Drosera's Detection Capability
+A Drosera trap monitoring this ratio would detect the anomalous state as soon as it becomes observable on-chain, enabling an automated emergency response in a subsequent action. While Drosera cannot interrupt an atomic exploit mid-transaction, it can detect the resulting bad debt state immediately after the block is produced and trigger containment before further damage occurs.

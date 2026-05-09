@@ -57,4 +57,46 @@ contract EulerBadDebtTrapTest is Test {
         (bool respond, ) = trap.shouldRespond(data);
         assertFalse(respond, "Trap should NOT fire for minor divergence");
     }
+
+    // Test 4: Zero assets with positive liabilities — MOST severe bad debt, trap SHOULD fire
+    function test_ZeroAssetsPositiveLiabilities_ShouldFire() public {
+        CollectOutput memory bad = CollectOutput({
+            totalAssets: 0,
+            totalLiabilities: 1000 ether
+        });
+
+        bytes[] memory data = new bytes[](1);
+        data[0] = abi.encode(bad);
+
+        (bool respond, ) = trap.shouldRespond(data);
+        assertTrue(respond, "Trap SHOULD fire when assets are zero but liabilities exist");
+    }
+
+    // Test 5: Exactly 5% divergence — trap SHOULD fire (uses >=)
+    function test_ExactlyAtThreshold_ShouldFire() public {
+        CollectOutput memory atThreshold = CollectOutput({
+            totalAssets: 1000 ether,
+            totalLiabilities: 1050 ether // exactly 5%
+        });
+
+        bytes[] memory data = new bytes[](1);
+        data[0] = abi.encode(atThreshold);
+
+        (bool respond, ) = trap.shouldRespond(data);
+        assertTrue(respond, "Trap SHOULD fire at exactly 5% divergence");
+    }
+
+    // Test 6: Just below 5% — trap should NOT fire
+    function test_JustBelowThreshold_ShouldNotFire() public {
+        CollectOutput memory justBelow = CollectOutput({
+            totalAssets: 1000 ether,
+            totalLiabilities: 1049 ether // just under 5%
+        });
+
+        bytes[] memory data = new bytes[](1);
+        data[0] = abi.encode(justBelow);
+
+        (bool respond, ) = trap.shouldRespond(data);
+        assertFalse(respond, "Trap should NOT fire just below 5% threshold");
+    }
 }

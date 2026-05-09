@@ -47,9 +47,15 @@ contract EulerBadDebtTrap is Trap {
             CollectOutput memory output = abi.decode(data[i], (CollectOutput));
 
             // If liabilities exceed assets, bad debt is forming
-            if (output.totalLiabilities > output.totalAssets) {
-                uint256 divergence = output.totalLiabilities - output.totalAssets;
-                uint256 divergenceBps = (divergence * 10000) / output.totalAssets;
+            if (output.totalAssets == 0) {
+		    if (output.totalLiabilities > 0) {
+		        return (true, abi.encode(output.totalAssets, output.totalLiabilities));
+		    }
+		    continue;
+	    }
+	    if (output.totalLiabilities > output.totalAssets) {
+		uint256 divergence = output.totalLiabilities - output.totalAssets;
+		uint256 divergenceBps = (divergence * 10000) / output.totalAssets;
 
                 // Trigger if divergence exceeds our threshold
                 if (divergenceBps >= THRESHOLD_BPS) {
