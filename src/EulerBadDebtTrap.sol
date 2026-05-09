@@ -43,26 +43,40 @@ contract EulerBadDebtTrap is Trap {
     function shouldRespond(
         bytes[] calldata data
     ) external override pure returns (bool, bytes memory) {
-        for (uint256 i = 0; i < data.length; i++) {
-            CollectOutput memory output = abi.decode(data[i], (CollectOutput));
+        if (data.length == 0) {
+            return (false, bytes(""));
+        }
 
-            // If liabilities exceed assets, bad debt is forming
-            if (output.totalAssets == 0) {
-		    if (output.totalLiabilities > 0) {
-		        return (true, abi.encode(output.totalAssets, output.totalLiabilities));
-		    }
-		    continue;
-	    }
-	    if (output.totalLiabilities > output.totalAssets) {
-		uint256 divergence = output.totalLiabilities - output.totalAssets;
-		uint256 divergenceBps = (divergence * 10000) / output.totalAssets;
+        // Always check most recent sample first (data[0])
+        CollectOutput memory current = abi.decode(data[0], (CollectOutput));
 
-                // Trigger if divergence exceeds our threshold
-                if (divergenceBps >= THRESHOLD_BPS) {
-                    return (true, abi.encode(output.totalAssets, output.totalLiabilities));
+        // Most severe case: zero assets with positive liabilities
+        if (current.totalAssets == 0) {
+            if (current.totalLiabilities > 0) {
+                return (true, abi.encode(current.totalAssets, current.totalLiabilities));
+            }
+            return (false, bytes(""));
+        }
+
+        // Check if current state shows bad debt divergence
+        if (current.totalLiabilities > current.totalAssets) {
+            uint256 divergence = current.totalLiabilities - current.totalAssets;
+            uint256 divergenceBps = (divergence * 10000) / current.totalAssets;
+
+            if (divergenceBps >= THRESHOLD_BPS) {
+                // Confirm with previous sample if available
+                if (data.length > 1) {
+                    CollectOutput memory previous = abi.decode(data[1], (CollectOutput));
+                    // Only fire if divergence is worsening or already bad
+                    if (previous.totalLiabilities >= previous.totalAssets) {
+                        return (true, abi.encode(current.totalAssets, current.totalLiabilities));
+                    }
                 }
+                // Fire even without confirmation — current state is bad enough
+                return (true, abi.encode(current.totalAssets, current.totalLiabilities));
             }
         }
+
         return (false, bytes(""));
     }
 }
