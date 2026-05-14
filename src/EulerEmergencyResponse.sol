@@ -1,58 +1,143 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.12;
+pragma solidity ^0.8.20;
 
-interface IProtocol {
-    function pauseMarket(address market) external;
+interface IEulerPauseTarget {
+    function emergencyPause() external;
+    function paused() external view returns (bool);
 }
 
 contract EulerEmergencyResponse {
+    enum IncidentType {
+        None,
+        BadDebt,
+        ReadFailure,
+        BadDebtWorsening
+    }
 
-    address public immutable authorizedCaller;
-    address public immutable protocol;
+    enum MarketId {
+        DAI,
+        USDC,
+        WBTC,
+        STETH
+    }
 
-    bool public paused;
-    uint256 public lastTotalAssets;
-    uint256 public lastTotalLiabilities;
+    struct Incident {
+        IncidentType incidentType;
+        MarketId marketId;
+        address eToken;
+        address dToken;
+        address pauseTarget;
+        uint256 totalAssets;
+        uint256 totalLiabilities;
+        uint256 divergenceBps;
+        uint256 previousDivergenceBps;
+        uint256 blockNumber;
+    }
 
-    event BadDebtDetected(uint256 totalAssets, uint256 totalLiabilities, uint256 timestamp);
-    event MarketPaused(uint256 totalAssets, uint256 totalLiabilities, uint256 timestamp);
+    address public immutable DROSERA_CALLER;
+    address public owner;
 
-    modifier onlyDrosera() {
-        require(msg.sender == authorizedCaller, "Not authorized: only Drosera can call this");
+    uint256 public immutable COOLDOWN_BLOCKS;
+    uint256 public lastResponseBlock;
+
+    mapping(address => bool) public approvedPauseTargets;
+    mapping(bytes32 => bool) public handledIncidents;
+
+    event OwnerUpdated(address indexed oldOwner, address indexed newOwner);
+    event PauseTargetUpdated(address indexed target, bool approved);
+
+    event EulerBadDebtContained(
+        bytes32 indexed incidentId,
+        MarketId indexed marketId,
+        address indexed pauseTarget,
+        IncidentType incidentType,
+        uint256 totalAssets,
+        uint256 totalLiabilities,
+        uint256 divergenceBps,
+        uint256 blockNumber
+    );
+
+    error OnlyOwner();
+    error OnlyDrosera();
+    error CooldownActive();
+    error InvalidIncident();
+    error PauseTargetNotApproved();
+    error PauseFailed();
+    error PauseDidNotTakeEffect();
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert OnlyOwner();
         _;
     }
 
-    constructor(address _authorizedCaller) {
-        require(_authorizedCaller != address(0), "Invalid authorized caller");
-        authorizedCaller = _authorizedCaller;
-        protocol = address(0); // set to real Euler address in production
+    modifier onlyDrosera() {
+        if (msg.sender != DROSERA_CALLER) revert OnlyDrosera();
+        _;
     }
 
-    // This is the function the trap calls when bad debt is detected
-    // Matches the response_function in drosera.toml:
-    // "pauseBadDebtMarket(uint256,uint256)"
-    function pauseBadDebtMarket(
-        uint256 totalAssets,
-        uint256 totalLiabilities
-    ) external onlyDrosera {
-        paused = true;
-        lastTotalAssets = totalAssets;
-        lastTotalLiabilities = totalLiabilities;
-
-        emit BadDebtDetected(totalAssets, totalLiabilities, block.timestamp);
-        emit MarketPaused(totalAssets, totalLiabilities, block.timestamp);
-    }
-
-    // View function to check if market is paused
-    function isMarketPaused() external view returns (bool) {
-        return paused;
-    }
-
-    // View function to check last recorded bad debt state
-    function getLastBadDebtState() external view returns (
-        uint256 assets,
-        uint256 liabilities
+    constructor(
+        address droseraCaller_,
+        address owner_,
+        uint256 cooldownBlocks_
     ) {
-        return (lastTotalAssets, lastTotalLiabilities);
+        require(droseraCaller_ != address(0), "zero drosera caller");
+        require(owner_ != address(0), "zero owner");
+
+        DROSERA_CALLER = droseraCaller_;
+        owner = owner_;
+        COOLDOWN_BLOCKS = cooldownBlocks_;
+    }
+
+    function setOwner(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "zero owner");
+        emit OwnerUpdated(owner, newOwner);
+        owner = newOwner;
+    }
+
+    function setPauseTarget(address target, bool approved) external onlyOwner {
+        require(target != address(0), "zero target");
+        approvedPauseTargets[target] = approved;
+        emit PauseTargetUpdated(target, approved);
+    }
+
+    function handleIncident(bytes calldata rawIncident) external onlyDrosera {
+        if (
+            lastResponseBlock != 0 &&
+            block.number < lastResponseBlock + COOLDOWN_BLOCKS
+        ) {
+            revert CooldownActive();
+        }
+
+        Incident memory incident = abi.decode(rawIncident, (Incident));
+        bytes32 incidentId = keccak256(rawIncident);
+
+        if (handledIncidents[incidentId]) return;
+
+        if (incident.incidentType == IncidentType.None) revert InvalidIncident();
+        if (incident.pauseTarget == address(0)) revert InvalidIncident();
+        if (!approvedPauseTargets[incident.pauseTarget]) revert PauseTargetNotApproved();
+
+        handledIncidents[incidentId] = true;
+        lastResponseBlock = block.number;
+
+        try IEulerPauseTarget(incident.pauseTarget).emergencyPause() {
+        } catch {
+            revert PauseFailed();
+        }
+
+        if (!IEulerPauseTarget(incident.pauseTarget).paused()) {
+            revert PauseDidNotTakeEffect();
+        }
+
+        emit EulerBadDebtContained(
+            incidentId,
+            incident.marketId,
+            incident.pauseTarget,
+            incident.incidentType,
+            incident.totalAssets,
+            incident.totalLiabilities,
+            incident.divergenceBps,
+            incident.blockNumber
+        );
     }
 }

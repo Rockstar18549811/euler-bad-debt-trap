@@ -1,94 +1,237 @@
-// SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.12;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
-import {EulerBadDebtTrap, CollectOutput, MarketSnapshot} from "../src/EulerBadDebtTrap.sol";
+import {EulerBadDebtTrap} from "../src/EulerBadDebtTrap.sol";
+import {EulerEmergencyResponse} from "../src/EulerEmergencyResponse.sol";
+import {MockEulerEToken, MockEulerDToken, MockEulerPauseTarget, MockEulerExploitSurface} from "../src/MockEulerMarket.sol";
 
 contract EulerBadDebtTrapTest is Test {
+
     EulerBadDebtTrap trap;
+    EulerEmergencyResponse response;
+
+    MockEulerEToken mockEDai;
+    MockEulerDToken mockDDai;
+    MockEulerPauseTarget mockPDai;
+    MockEulerExploitSurface exploitSurface;
+
+    address droseraCaller = address(0xD305E8A);
+    address owner = address(0x0000000000000000000000000000000000000001);
+
+    // Helper: build a valid 3-sample data array
+    function _makeSamples(
+        uint256 assets,
+        uint256 liabilities,
+        bool assetOk,
+        bool liabilityOk
+    ) internal view returns (bytes[] memory data) {
+        data = new bytes[](3);
+        for (uint256 i = 0; i < 3; i++) {
+            EulerBadDebtTrap.MarketSnapshot memory snap = EulerBadDebtTrap.MarketSnapshot({
+                marketId: EulerBadDebtTrap.MarketId.DAI,
+                eToken: address(mockEDai),
+                dToken: address(mockDDai),
+                pauseTarget: address(mockPDai),
+                totalAssets: assets,
+                totalLiabilities: liabilities,
+                assetReadOk: assetOk,
+                liabilityReadOk: liabilityOk
+            });
+
+            EulerBadDebtTrap.MarketSnapshot memory healthy = EulerBadDebtTrap.MarketSnapshot({
+                marketId: EulerBadDebtTrap.MarketId.USDC,
+                eToken: address(0),
+                dToken: address(0),
+                pauseTarget: address(0),
+                totalAssets: 1000 ether,
+                totalLiabilities: 900 ether,
+                assetReadOk: true,
+                liabilityReadOk: true
+            });
+
+            EulerBadDebtTrap.CollectOutput memory out = EulerBadDebtTrap.CollectOutput({
+                schemaVersion: 1,
+                blockNumber: block.number + (2 - i),
+                dai: snap,
+                usdc: healthy,
+                wbtc: healthy,
+                steth: healthy
+            });
+            data[i] = abi.encode(out);
+        }
+    }
 
     function setUp() public {
         trap = new EulerBadDebtTrap();
+        mockEDai = new MockEulerEToken();
+        mockDDai = new MockEulerDToken();
+        mockPDai = new MockEulerPauseTarget(address(response));
+        exploitSurface = new MockEulerExploitSurface(address(mockEDai), address(mockDDai));
+        response = new EulerEmergencyResponse(droseraCaller, owner, 33);
     }
 
-    function _healthyMarket() internal pure returns (MarketSnapshot memory) {
-        return MarketSnapshot({totalAssets: 1000 ether, totalLiabilities: 900 ether});
+    // ===== TRAP TESTS =====
+
+    function test_HealthyMarketDoesNotTrigger() public {
+        bytes[] memory data = _makeSamples(1000 ether, 900 ether, true, true);
+        (bool fire,) = trap.shouldRespond(data);
+        assertFalse(fire);
     }
 
-    function _makeOutput(MarketSnapshot memory dai) internal pure returns (CollectOutput memory) {
-        return CollectOutput({
-            dai: dai,
-            usdc: _healthyMarket(),
-            wbtc: _healthyMarket(),
-            steth: _healthyMarket()
-        });
+    function test_DAIBadDebtTriggers() public {
+        bytes[] memory data = _makeSamples(800 ether, 1000 ether, true, true);
+        (bool fire,) = trap.shouldRespond(data);
+        assertTrue(fire);
     }
 
-    // Test 1: Normal healthy protocol state — trap should NOT fire
-    function test_HealthyProtocol() public {
-        bytes[] memory data = new bytes[](1);
-        data[0] = abi.encode(_makeOutput(_healthyMarket()));
-        (bool respond, ) = trap.shouldRespond(data);
-        assertFalse(respond, "Trap should NOT fire when protocol is healthy");
+    function test_Divergence499BpsDoesNotTrigger() public {
+        bytes[] memory data = _makeSamples(1000 ether, 1049 ether, true, true);
+        (bool fire,) = trap.shouldRespond(data);
+        assertFalse(fire);
     }
 
-    // Test 2: Euler-style bad debt forming — trap SHOULD fire
-    function test_EulerStyleBadDebt() public {
-        MarketSnapshot memory exploited = MarketSnapshot({
+    function test_Divergence500BpsTriggers() public {
+        bytes[] memory data = _makeSamples(1000 ether, 1050 ether, true, true);
+        (bool fire,) = trap.shouldRespond(data);
+        assertTrue(fire);
+    }
+
+    function test_ZeroAssetsNonzeroLiabilitiesTriggers() public {
+        bytes[] memory data = _makeSamples(0, 1000 ether, true, true);
+        (bool fire,) = trap.shouldRespond(data);
+        assertTrue(fire);
+    }
+
+    function test_ReadFailureTriggers() public {
+        bytes[] memory data = _makeSamples(0, 0, false, false);
+        (bool fire,) = trap.shouldRespond(data);
+        assertTrue(fire);
+    }
+
+    function test_WrongSampleCountRejected() public {
+        bytes[] memory data = new bytes[](2);
+        data[0] = new bytes(trap.COLLECT_OUTPUT_SIZE());
+        data[1] = new bytes(trap.COLLECT_OUTPUT_SIZE());
+        (bool fire,) = trap.shouldRespond(data);
+        assertFalse(fire);
+    }
+
+    function test_MalformedShortBytesDoNotRevert() public {
+        bytes[] memory data = new bytes[](3);
+        data[0] = new bytes(10);
+        data[1] = new bytes(10);
+        data[2] = new bytes(10);
+        (bool fire,) = trap.shouldRespond(data);
+        assertFalse(fire);
+    }
+
+    function test_MalformedLongBytesDoNotRevert() public {
+        bytes[] memory data = new bytes[](3);
+        data[0] = new bytes(1000);
+        data[1] = new bytes(1000);
+        data[2] = new bytes(1000);
+        (bool fire,) = trap.shouldRespond(data);
+        assertFalse(fire);
+    }
+
+    // ===== RESPONSE TESTS =====
+
+    function test_WrongCallerRejected() public {
+        vm.prank(address(0xBad));
+        vm.expectRevert(EulerEmergencyResponse.OnlyDrosera.selector);
+        response.handleIncident(bytes(""));
+    }
+
+    function test_OwnerCanApprovePauseTarget() public {
+        vm.prank(owner);
+        response.setPauseTarget(address(mockPDai), true);
+        assertTrue(response.approvedPauseTargets(address(mockPDai)));
+    }
+
+    function test_NonOwnerCannotApprovePauseTarget() public {
+        vm.prank(address(0xBad));
+        vm.expectRevert(EulerEmergencyResponse.OnlyOwner.selector);
+        response.setPauseTarget(address(mockPDai), true);
+    }
+
+    function test_UnapprovedTargetRejected() public {
+        EulerEmergencyResponse.Incident memory incident = EulerEmergencyResponse.Incident({
+            incidentType: EulerEmergencyResponse.IncidentType.BadDebt,
+            marketId: EulerEmergencyResponse.MarketId.DAI,
+            eToken: address(mockEDai),
+            dToken: address(mockDDai),
+            pauseTarget: address(mockPDai),
             totalAssets: 800 ether,
-            totalLiabilities: 1000 ether
+            totalLiabilities: 1000 ether,
+            divergenceBps: 2500,
+            previousDivergenceBps: 0,
+            blockNumber: block.number
         });
-        bytes[] memory data = new bytes[](1);
-        data[0] = abi.encode(_makeOutput(exploited));
-        (bool respond, ) = trap.shouldRespond(data);
-        assertTrue(respond, "Trap SHOULD fire when bad debt is forming");
+
+        vm.prank(droseraCaller);
+        vm.expectRevert(EulerEmergencyResponse.PauseTargetNotApproved.selector);
+        response.handleIncident(abi.encode(incident));
     }
 
-    // Test 3: Small divergence below threshold — trap should NOT fire
-    function test_SmallDivergenceBelowThreshold() public {
-        MarketSnapshot memory minor = MarketSnapshot({
-            totalAssets: 1000 ether,
-            totalLiabilities: 1020 ether
+    function test_ApprovedTargetPauses() public {
+        mockPDai = new MockEulerPauseTarget(address(response));
+        vm.prank(owner);
+        response.setPauseTarget(address(mockPDai), true);
+
+        EulerEmergencyResponse.Incident memory incident = EulerEmergencyResponse.Incident({
+            incidentType: EulerEmergencyResponse.IncidentType.BadDebt,
+            marketId: EulerEmergencyResponse.MarketId.DAI,
+            eToken: address(mockEDai),
+            dToken: address(mockDDai),
+            pauseTarget: address(mockPDai),
+            totalAssets: 800 ether,
+            totalLiabilities: 1000 ether,
+            divergenceBps: 2500,
+            previousDivergenceBps: 0,
+            blockNumber: block.number
         });
-        bytes[] memory data = new bytes[](1);
-        data[0] = abi.encode(_makeOutput(minor));
-        (bool respond, ) = trap.shouldRespond(data);
-        assertFalse(respond, "Trap should NOT fire for minor divergence");
+
+        vm.prank(droseraCaller);
+        response.handleIncident(abi.encode(incident));
+        assertTrue(mockPDai.paused());
     }
 
-    // Test 4: Zero assets with positive liabilities — MOST severe bad debt
-    function test_ZeroAssetsPositiveLiabilities_ShouldFire() public {
-        MarketSnapshot memory bad = MarketSnapshot({
-            totalAssets: 0,
-            totalLiabilities: 1000 ether
+    function test_CooldownWorks() public {
+        mockPDai = new MockEulerPauseTarget(address(response));
+        vm.prank(owner);
+        response.setPauseTarget(address(mockPDai), true);
+
+        EulerEmergencyResponse.Incident memory incident = EulerEmergencyResponse.Incident({
+            incidentType: EulerEmergencyResponse.IncidentType.BadDebt,
+            marketId: EulerEmergencyResponse.MarketId.DAI,
+            eToken: address(mockEDai),
+            dToken: address(mockDDai),
+            pauseTarget: address(mockPDai),
+            totalAssets: 800 ether,
+            totalLiabilities: 1000 ether,
+            divergenceBps: 2500,
+            previousDivergenceBps: 0,
+            blockNumber: block.number
         });
-        bytes[] memory data = new bytes[](1);
-        data[0] = abi.encode(_makeOutput(bad));
-        (bool respond, ) = trap.shouldRespond(data);
-        assertTrue(respond, "Trap SHOULD fire when assets are zero but liabilities exist");
+
+        vm.prank(droseraCaller);
+        response.handleIncident(abi.encode(incident));
+
+        vm.prank(droseraCaller);
+        vm.expectRevert(EulerEmergencyResponse.CooldownActive.selector);
+        response.handleIncident(abi.encode(incident));
     }
 
-    // Test 5: Exactly 5% divergence — trap SHOULD fire
-    function test_ExactlyAtThreshold_ShouldFire() public {
-        MarketSnapshot memory atThreshold = MarketSnapshot({
-            totalAssets: 1000 ether,
-            totalLiabilities: 1050 ether
-        });
-        bytes[] memory data = new bytes[](1);
-        data[0] = abi.encode(_makeOutput(atThreshold));
-        (bool respond, ) = trap.shouldRespond(data);
-        assertTrue(respond, "Trap SHOULD fire at exactly 5% divergence");
-    }
+    // ===== INTEGRATION TEST =====
 
-    // Test 6: Just below 5% — trap should NOT fire
-    function test_JustBelowThreshold_ShouldNotFire() public {
-        MarketSnapshot memory justBelow = MarketSnapshot({
-            totalAssets: 1000 ether,
-            totalLiabilities: 1049 ether
-        });
-        bytes[] memory data = new bytes[](1);
-        data[0] = abi.encode(_makeOutput(justBelow));
-        (bool respond, ) = trap.shouldRespond(data);
-        assertFalse(respond, "Trap should NOT fire just below 5% threshold");
+    function test_ExploitSurfaceBurnsAssetsWithoutReducingLiabilities() public {
+        exploitSurface.healthySetup(1000 ether, 800 ether);
+        assertEq(mockEDai.totalSupplyUnderlying(), 1000 ether);
+        assertEq(mockDDai.totalSupply(), 800 ether);
+
+        exploitSurface.donateToReservesBug(300 ether);
+        assertEq(mockEDai.totalSupplyUnderlying(), 700 ether);
+        assertEq(mockDDai.totalSupply(), 800 ether);
     }
 }

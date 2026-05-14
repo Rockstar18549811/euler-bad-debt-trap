@@ -1,105 +1,232 @@
-// SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.12;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
 
-import {Trap} from "drosera-contracts/Trap.sol";
+import {ITrap} from "drosera-contracts/interfaces/ITrap.sol";
 
-interface IEulerEToken {
-    function totalSupply() external view returns (uint256);
+interface IEulerETokenLike {
     function totalSupplyUnderlying() external view returns (uint256);
 }
 
-interface IEulerDToken {
+interface IEulerDTokenLike {
     function totalSupply() external view returns (uint256);
 }
 
-struct MarketSnapshot {
-    uint256 totalAssets;
-    uint256 totalLiabilities;
-}
+contract EulerBadDebtTrap is ITrap {
+    uint8 public constant SCHEMA_VERSION = 1;
+    uint256 public constant BPS = 10_000;
+    uint256 public constant BAD_DEBT_THRESHOLD_BPS = 500;
+    uint256 public constant REQUIRED_SAMPLES = 3;
 
-struct CollectOutput {
-    MarketSnapshot dai;
-    MarketSnapshot usdc;
-    MarketSnapshot wbtc;
-    MarketSnapshot steth;
-}
-
-contract EulerBadDebtTrap is Trap {
-
-    // Euler Finance v1 — DAI market (Ethereum mainnet, verified)
-    address public constant EDAI   = 0xe025E3ca2bE02316033184551D4d3Aa22024D9DC;
-    address public constant DDAI   = 0x6085BC95573b59b5f12966B8f5e6db1A06B504e7;
-
-    // Euler Finance v1 — USDC market
-    // NOTE: Replace with verified address from euler-interfaces repository
-    address public constant EUSDC  = 0x84dceC4b1B3E0EA0C4a20f7f0dB08E2BE8EF5E18;
-    address public constant DUSDC  = 0xEb91861f8A4e1C12333F42DCE8fB0Ecdc28dA716;
-
-    // Euler Finance v1 — wBTC market
-    // NOTE: Replace with verified address from euler-interfaces repository
-    address public constant EWBTC  = 0x48e7e7F7D5f5e3e7e5f5e5e5E5e5E5e5e5e5E501;
-    address public constant DWBTC  = 0xe2cA0a7D1AB8c6e4B4Ec0E7a8be2c3d4e5f6a701;
-
-    // Euler Finance v1 — stETH market
-    // NOTE: Replace with verified address from euler-interfaces repository
-    address public constant ESTETH = 0xbE09aCF7a2257AA7b4fB41F8D3E2B5c4DDa12341;
-    address public constant DSTETH = 0xA1B2C3d4E5f6A7b8C9D0E1f2a3B4C5d6e7F8A901;
-
-    // Threshold: 5% divergence triggers the trap
-    uint256 public constant THRESHOLD_BPS = 500;
-
-    constructor() {}
-
-    function _getSnapshot(address eToken, address dToken)
-        internal view returns (MarketSnapshot memory snap)
-    {
-        snap.totalAssets = IEulerEToken(eToken).totalSupplyUnderlying();
-        snap.totalLiabilities = IEulerDToken(dToken).totalSupply();
+    enum MarketId {
+        DAI,
+        USDC,
+        WBTC,
+        STETH
     }
 
-    function collect() external override view returns (bytes memory) {
-        CollectOutput memory out;
-        out.dai   = _getSnapshot(EDAI,   DDAI);
-        out.usdc  = _getSnapshot(EUSDC,  DUSDC);
-        out.wbtc  = _getSnapshot(EWBTC,  DWBTC);
-        out.steth = _getSnapshot(ESTETH, DSTETH);
-        return abi.encode(out);
+    enum IncidentType {
+        None,
+        BadDebt,
+        ReadFailure,
+        BadDebtWorsening
     }
 
-    function _isBadDebt(MarketSnapshot memory m) internal pure returns (bool) {
-        if (m.totalAssets == 0) {
-            return m.totalLiabilities > 0;
-        }
-        if (m.totalLiabilities > m.totalAssets) {
-            uint256 divergence = m.totalLiabilities - m.totalAssets;
-            uint256 divergenceBps = (divergence * 10000) / m.totalAssets;
-            return divergenceBps >= THRESHOLD_BPS;
-        }
-        return false;
+    struct MarketConfig {
+        address eToken;
+        address dToken;
+        address pauseTarget;
+    }
+
+    struct MarketSnapshot {
+        MarketId marketId;
+        address eToken;
+        address dToken;
+        address pauseTarget;
+        uint256 totalAssets;
+        uint256 totalLiabilities;
+        bool assetReadOk;
+        bool liabilityReadOk;
+    }
+
+    struct CollectOutput {
+        uint8 schemaVersion;
+        uint256 blockNumber;
+        MarketSnapshot dai;
+        MarketSnapshot usdc;
+        MarketSnapshot wbtc;
+        MarketSnapshot steth;
+    }
+
+    struct Incident {
+        IncidentType incidentType;
+        MarketId marketId;
+        address eToken;
+        address dToken;
+        address pauseTarget;
+        uint256 totalAssets;
+        uint256 totalLiabilities;
+        uint256 divergenceBps;
+        uint256 previousDivergenceBps;
+        uint256 blockNumber;
+    }
+
+    address public constant E_DAI = 0x1111111111111111111111111111111111111001;
+    address public constant D_DAI = 0x1111111111111111111111111111111111111002;
+    address public constant P_DAI = 0x1111111111111111111111111111111111111003;
+
+    address public constant E_USDC = 0x1111111111111111111111111111111111112001;
+    address public constant D_USDC = 0x1111111111111111111111111111111111112002;
+    address public constant P_USDC = 0x1111111111111111111111111111111111112003;
+
+    address public constant E_WBTC = 0x1111111111111111111111111111111111113001;
+    address public constant D_WBTC = 0x1111111111111111111111111111111111113002;
+    address public constant P_WBTC = 0x1111111111111111111111111111111111113003;
+
+    address public constant E_STETH = 0x1111111111111111111111111111111111114001;
+    address public constant D_STETH = 0x1111111111111111111111111111111111114002;
+    address public constant P_STETH = 0x1111111111111111111111111111111111114003;
+
+    uint256 public constant MARKET_SNAPSHOT_WORDS = 8;
+    uint256 public constant COLLECT_OUTPUT_WORDS = 2 + (4 * MARKET_SNAPSHOT_WORDS);
+    uint256 public constant COLLECT_OUTPUT_SIZE = COLLECT_OUTPUT_WORDS * 32;
+
+    function collect() external view override returns (bytes memory) {
+        return abi.encode(
+            CollectOutput({
+                schemaVersion: SCHEMA_VERSION,
+                blockNumber: block.number,
+                dai: _snapshot(MarketId.DAI, E_DAI, D_DAI, P_DAI),
+                usdc: _snapshot(MarketId.USDC, E_USDC, D_USDC, P_USDC),
+                wbtc: _snapshot(MarketId.WBTC, E_WBTC, D_WBTC, P_WBTC),
+                steth: _snapshot(MarketId.STETH, E_STETH, D_STETH, P_STETH)
+            })
+        );
     }
 
     function shouldRespond(
         bytes[] calldata data
-    ) external override pure returns (bool, bytes memory) {
-        if (data.length == 0) {
-            return (false, bytes(""));
-        }
+    ) external pure override returns (bool, bytes memory) {
+        if (data.length != REQUIRED_SAMPLES) return (false, bytes(""));
+        if (!_validEncodedSamples(data)) return (false, bytes(""));
 
         CollectOutput memory current = abi.decode(data[0], (CollectOutput));
+        CollectOutput memory previous = abi.decode(data[1], (CollectOutput));
+        CollectOutput memory oldest = abi.decode(data[data.length - 1], (CollectOutput));
 
-        if (_isBadDebt(current.dai)) {
-            return (true, abi.encode(current.dai.totalAssets, current.dai.totalLiabilities));
-        }
-        if (_isBadDebt(current.usdc)) {
-            return (true, abi.encode(current.usdc.totalAssets, current.usdc.totalLiabilities));
-        }
-        if (_isBadDebt(current.wbtc)) {
-            return (true, abi.encode(current.wbtc.totalAssets, current.wbtc.totalLiabilities));
-        }
-        if (_isBadDebt(current.steth)) {
-            return (true, abi.encode(current.steth.totalAssets, current.steth.totalLiabilities));
-        }
+        if (!_validWindow(current, previous, oldest)) return (false, bytes(""));
+
+        (bool fire, Incident memory incident) = _evaluateMarket(current.dai, previous.dai, current.blockNumber);
+        if (fire) return (true, abi.encode(incident));
+
+        (fire, incident) = _evaluateMarket(current.usdc, previous.usdc, current.blockNumber);
+        if (fire) return (true, abi.encode(incident));
+
+        (fire, incident) = _evaluateMarket(current.wbtc, previous.wbtc, current.blockNumber);
+        if (fire) return (true, abi.encode(incident));
+
+        (fire, incident) = _evaluateMarket(current.steth, previous.steth, current.blockNumber);
+        if (fire) return (true, abi.encode(incident));
 
         return (false, bytes(""));
+    }
+
+    function _snapshot(
+        MarketId marketId,
+        address eToken,
+        address dToken,
+        address pauseTarget
+    ) internal view returns (MarketSnapshot memory snap) {
+        snap.marketId = marketId;
+        snap.eToken = eToken;
+        snap.dToken = dToken;
+        snap.pauseTarget = pauseTarget;
+
+        if (eToken.code.length > 0) {
+            try IEulerETokenLike(eToken).totalSupplyUnderlying() returns (uint256 assets) {
+                snap.totalAssets = assets;
+                snap.assetReadOk = true;
+            } catch {
+                snap.assetReadOk = false;
+            }
+        }
+
+        if (dToken.code.length > 0) {
+            try IEulerDTokenLike(dToken).totalSupply() returns (uint256 liabilities) {
+                snap.totalLiabilities = liabilities;
+                snap.liabilityReadOk = true;
+            } catch {
+                snap.liabilityReadOk = false;
+            }
+        }
+    }
+
+    function _evaluateMarket(
+        MarketSnapshot memory current,
+        MarketSnapshot memory previous,
+        uint256 blockNumber
+    ) internal pure returns (bool, Incident memory incident) {
+        uint256 currentDivergence = _divergenceBps(current.totalAssets, current.totalLiabilities);
+        uint256 previousDivergence = _divergenceBps(previous.totalAssets, previous.totalLiabilities);
+
+        incident = Incident({
+            incidentType: IncidentType.None,
+            marketId: current.marketId,
+            eToken: current.eToken,
+            dToken: current.dToken,
+            pauseTarget: current.pauseTarget,
+            totalAssets: current.totalAssets,
+            totalLiabilities: current.totalLiabilities,
+            divergenceBps: currentDivergence,
+            previousDivergenceBps: previousDivergence,
+            blockNumber: blockNumber
+        });
+
+        if (!current.assetReadOk || !current.liabilityReadOk) {
+            incident.incidentType = IncidentType.ReadFailure;
+            return (true, incident);
+        }
+
+        if (currentDivergence >= BAD_DEBT_THRESHOLD_BPS) {
+            incident.incidentType = currentDivergence > previousDivergence
+                ? IncidentType.BadDebtWorsening
+                : IncidentType.BadDebt;
+            return (true, incident);
+        }
+
+        return (false, incident);
+    }
+
+    function _divergenceBps(
+        uint256 assets,
+        uint256 liabilities
+    ) internal pure returns (uint256) {
+        if (liabilities <= assets) return 0;
+        if (assets == 0) return type(uint256).max;
+        uint256 gap = liabilities - assets;
+        return (gap * BPS) / assets;
+    }
+
+    function _validEncodedSamples(bytes[] calldata data) internal pure returns (bool) {
+        for (uint256 i = 0; i < data.length; i++) {
+            if (data[i].length != COLLECT_OUTPUT_SIZE) return false;
+        }
+        return true;
+    }
+
+    function _validWindow(
+        CollectOutput memory current,
+        CollectOutput memory previous,
+        CollectOutput memory oldest
+    ) internal pure returns (bool) {
+        if (current.schemaVersion != SCHEMA_VERSION) return false;
+        if (previous.schemaVersion != SCHEMA_VERSION) return false;
+        if (oldest.schemaVersion != SCHEMA_VERSION) return false;
+        if (current.blockNumber != previous.blockNumber + 1) return false;
+        if (previous.blockNumber != oldest.blockNumber + 1) return false;
+        return true;
+    }
+
+    function decodeIncident(bytes calldata data) external pure returns (Incident memory) {
+        return abi.decode(data, (Incident));
     }
 }

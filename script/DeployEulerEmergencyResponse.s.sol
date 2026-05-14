@@ -1,23 +1,26 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.12;
+pragma solidity ^0.8.20;
 
 import "forge-std/Script.sol";
 import "../src/EulerEmergencyResponse.sol";
 
 contract DeployEulerEmergencyResponse is Script {
     function run() external returns (EulerEmergencyResponse response) {
-        // Chain ID guard — prevents accidental deployment to wrong network
-        require(block.chainid == 1, "This script is for Ethereum mainnet only");
+        require(block.chainid == 1, "Ethereum mainnet only");
 
-        // Load authorized caller from environment
-        address authorizedCaller = vm.envAddress("DROSERA_AUTHORIZED_CALLER");
-        require(authorizedCaller != address(0), "Invalid authorized caller");
+        address droseraCaller = vm.envAddress("DROSERA_AUTHORIZED_CALLER");
+        address owner = vm.envAddress("OWNER_ADDRESS");
+        uint256 cooldownBlocks = 33;
+
+        require(droseraCaller != address(0), "Invalid drosera caller");
+        require(owner != address(0), "Invalid owner");
 
         vm.startBroadcast();
-        response = new EulerEmergencyResponse(authorizedCaller);
+        response = new EulerEmergencyResponse(droseraCaller, owner, cooldownBlocks);
         vm.stopBroadcast();
 
         console.log("EulerEmergencyResponse deployed at:", address(response));
-        console.log("Authorized caller:", authorizedCaller);
+        console.log("Drosera caller:", droseraCaller);
+        console.log("Owner:", owner);
     }
 }

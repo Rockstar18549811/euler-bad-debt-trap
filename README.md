@@ -49,7 +49,9 @@ forge test -vv
 ```
 
 ## Key Insight
-The Euler attack created a divergence between eToken assets and dToken liabilities that grew with every exploit transaction. A Drosera trap monitoring this ratio in real time would have detected the anomaly within the same block the attack began — giving protocols the opportunity to trigger an emergency pause before funds were fully drained.
+
+The trap detects the first post-block state where market liabilities materially exceed assets, enabling an automated emergency response in a subsequent on-chain action. While Drosera cannot interrupt an atomic exploit mid-transaction, it can detect the resulting bad debt state immediately after the block is produced and trigger containment before further damage occurs.
+This demo is a mock-production-like Euler replay. It models the core accounting failure: collateral/assets decrease while debt/liabilities remain. A true historical replay would require verified Euler market/controller contracts and access to the protocol.
 
 ## Drosera's Detection Capability
 A Drosera trap monitoring this ratio would detect the anomalous state as soon as it becomes observable on-chain, enabling an automated emergency response in a subsequent action. While Drosera cannot interrupt an atomic exploit mid-transaction, it can detect the resulting bad debt state immediately after the block is produced and trigger containment before further damage occurs.
